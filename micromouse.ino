@@ -1,11 +1,5 @@
-//#define A0; // RIGHT PHOTOTRANSISTOR
-//#define A1; // MIDDLE PHOTOTRANSISTOR
-//#define A2; // LEFT PHOTOTRANSISTOR
-//#define A5; // RIGHT PHOTOTRANSISTOR
-//#define A6; // 4 WAY DIP SWITCH ANALOG READ
-//#define A7; // BATTERY ANALOG READ
-//#define A4; // UNSURE 
-
+/** DO NOT CHANGE THE FOLLOWING DEFINITONS - From UKMARS MazeRunner GitHub **/
+/** =============================================================================================================== **/
 #if defined(__AVR_ATmega328__) || defined(__AVR_ATmega328P__)
 #define __digitalPinToPortReg(P) (((P) <= 7) ? &PORTD : (((P) >= 8 && (P) <= 13) ? &PORTB : &PORTC))
 #define __digitalPinToDDRReg(P) (((P) <= 7) ? &DDRD : (((P) >= 8 && (P) <= 13) ? &DDRB : &DDRC))
@@ -30,18 +24,24 @@
 #define fast_read_pin(P) ((int)(((BIT_READ(*__digitalPinToPINReg(P), __digitalPinToBit(P))) ? HIGH : LOW)))
 
 #else
-#define fast_write_pin(P, V) digitalWrite(P, V)
+#define fast_write_pin(P, V) fast_write_pin(P, V)
 #define fast_read_pin(P) digitalRead(P)
 #endif
 
-const int RED_LEDS = 12; // RED LEDS
-const int RED_LED_H_BRIDGE = 13; // RED LED H BRIDGE
+
+#include "Queue.h"
+/** =============================================================================================================== **/
+
+/** DEFINE OUR PINS AND WHICH COMPONENTS THEY ARE CONNECTED TO **/
+/** _______________________________________________________________________________________________________________ **/
+const int EMITTERS = 12; // EMITTERS
+const int RED_LED = 13; // RED LED AT H BRIDGE
 
 const int INDICATOR_LED_R = 6; // INDICATOR LED RIGHT 
 const int INDICATOR_LED_L = 11; // INDICATOR LED LEFT
 
 const int ENCODER_R_A = 3; // ENCODER RIGHT A (ticks first when motor forward)
-const int ENCODER_R_B = 5; // ENCODER RIGHT B (ticks first when motor backward) FWD
+const int ENCODER_R_B = 5; // ENCODER RIGHT B (ticks first when motor backward) 
 
 const int ENCODER_L_A = 4; // ENCODER LEFT A (ticks first when motor forward)
 const int ENCODER_L_B = 2; // ENCODER LEFT B (ticks first when motor backward)
@@ -52,32 +52,247 @@ const int SPEED_MOTOR_R = 10; // PWM MOTOR RIGHT
 const int DIR_MOTOR_L = 7; // DIRECTION MOTOR LEFT 
 const int DIR_MOTOR_R = 8; // DIRECTION MOTOR RIGHT 
 
-// Directions
-const int FORWARDS_L = 1;
-const int FORWARDS_R = 0;
-const int REVERSE_L = 0;
-const int REVERSE_R = 1;
-
+// Phototransistors
 const int RIGHT_SENSOR = A0;
 const int LEFT_SENSOR = A2;
 const int MIDDLE_SENSOR = A1;
 
-volatile int rightEncoderPos = 0; // Counts for right encoder position
-volatile int leftEncoderPos = 0; // Counts for left encoder position
+// 4 Way switch and push button
+const int DIP_SWITCH = A6; 
+/** _______________________________________________________________________________________________________________ **/
 
-volatile bool interruptOccurred = false;
-volatile unsigned long startTime;
-volatile unsigned long endTime;
-volatile unsigned long duration;
-volatile unsigned long prevDuration = 0;
-volatile int uptick = 1;
-volatile bool isActive;
+/* GLOBAL VARIABLES */
+volatile int rightEncoderPos = 0; // Counts for right encoder ticks
+volatile int leftEncoderPos = 0; // Counts for left encoder ticks
+
+// Variables to help us with our PID
+int prevTime = 0;
+int prevError;
+int errorIntegral;
+
+// Flag variable to indicate whether the switch is on or off
+bool switchOn = false;
+
+// Variables to keep track of our sensors
+int sensorThreshold = 20;
+
+// Variables to keep track of where we are in the maze with coordinates
+const int START[2] = {0,0};
+const int GOAL[2] = {6,6};
+String prevHeading = "NORTH"; // can be NORTH, EAST, SOUTH, WEST, initialise to NORTH 
+/** _______________________________________________________________________________________________________________ **/
+
+/** INTERRUPT SERVICE ROUTINES FOR HANDLING ENCODER COUNTING USING STATE TABLE METHOD **/
+void readEncoderLeft() {
+  static uint8_t prevState = 0; 
+  static uint8_t currState = 0; 
+  static unsigned long lastTime = 0; 
+  
+  currState = (fast_read_pin(ENCODER_L_B) << 1) | fast_read_pin(ENCODER_L_A);
+  
+  unsigned long currentTime = micros();
+  unsigned long deltaTime = currentTime - lastTime;
+  lastTime = currentTime;
+  
+  // direction based on prev state
+  uint8_t direction = (prevState << 2) | currState;
+  switch(direction) {
+    case 0b0001:
+    case 0b0111:
+    case 0b1110:
+    case 0b1000:
+      leftEncoderPos++;
+      break;
+    case 0b0010:
+    case 0b1100:
+    case 0b0101:
+    case 0b1011:
+      leftEncoderPos--;
+      break;
+
+    default:
+      break;
+  }
+
+  prevState = currState;
+}
+void readEncoderRight() {
+  static uint8_t prevState = 0; 
+  static uint8_t currState = 0; 
+  static unsigned long lastTime = 0; 
+  
+  currState = (fast_read_pin(ENCODER_R_B) << 1) | fast_read_pin(ENCODER_R_A);
+  
+  unsigned long currentTime = micros();
+  unsigned long deltaTime = currentTime - lastTime;
+  lastTime = currentTime;
+  
+  uint8_t direction = (prevState << 2) | currState;
+  switch(direction) {
+    case 0b0100:
+    case 0b1010:
+    case 0b0111:
+    case 0b1001:
+      rightEncoderPos++;
+      break;
+    case 0b1000:
+    case 0b0110:
+    case 0b1101:
+    case 0b0011:
+      rightEncoderPos--;
+      break;
+
+    default:
+      break;
+  }
+  
+  prevState = currState;
+}
+
+/** Function to set motor speed and direction for BOTH motors
+    @params dir - can either be HIGH or LOW for clockwise / counter clockwise rotation
+    @params speed - analogWrite() value between 0-255
+    @params mode - mode you want to move your motors in, can either be FORWARDS mode or ROTATE mode
+**/
+//==============================================================================================
+void setMotors(int dir, int speed, String mode){
+  analogWrite(SPEED_MOTOR_L, speed);
+  analogWrite(SPEED_MOTOR_R, speed);
+  
+  if(mode == "FORWARD"){
+    if(dir == 1){
+      fast_write_pin(DIR_MOTOR_L, HIGH);
+      fast_write_pin(DIR_MOTOR_R, LOW);
+    } else if (dir == -1){
+      fast_write_pin(DIR_MOTOR_L, LOW);
+      fast_write_pin(DIR_MOTOR_R, HIGH);
+    } else{
+      analogWrite(SPEED_MOTOR_L, 0);
+      analogWrite(SPEED_MOTOR_R, 0);
+    }
+  } else if(mode == "ROTATE"){ // Making both motors set to same direction will cause the robot to tank turn in place
+      if(dir == 1){
+      fast_write_pin(DIR_MOTOR_R, LOW);
+      fast_write_pin(DIR_MOTOR_L, LOW);
+    } else if (dir == -1){
+      fast_write_pin(DIR_MOTOR_R, HIGH);
+      fast_write_pin(DIR_MOTOR_L, HIGH);
+    } else{
+      analogWrite(SPEED_MOTOR_R, 0);
+      analogWrite(SPEED_MOTOR_L, 0);
+    }
+  }
+}
+//==============================================================================================
+
+/** Function to make the robot travel for a certain amount of encoder ticks, calls upon setMotors at end
+    @params dir - setPoint: The target value for how far we want to go (in encoder ticks)
+    @params speed - analogWrite() value between 0-255
+    @params kp - proportional gain, this is the main one you should be changing
+    @params ki - intergral gain, use this for steady state errors
+    @params kd - derivative gain, use this for overshoot and oscillation handling 
+    @params mode - mode you want to move your motors in, can either be FORWARDS mode or ROTATE mode
+**/
+void motorPID(int setPoint, float kp, float ki, float kd, String mode){
+  int currentTime = micros();
+  int deltaT = ((float)(currentTime - prevTime)) / 1.0e6; // time difference between ticks in seconds
+  prevTime = currentTime; // update prevTime each loop 
+  
+  int error = setPoint - rightEncoderPos;
+  int errorDerivative = (error - prevError) / deltaT;
+  errorIntegral = errorIntegral + error*deltaT;
+
+  float u = kp*error + ki*errorIntegral + kd*errorDerivative; 
+
+  float speed = fabs(u);
+  if(speed > 255){
+    speed = 255;
+  }
+
+  int dir = 1;
+  if (u < 0) {
+    dir = -1; // Move backward
+  } else {
+    dir = 1; // Move forward
+  }
+
+  setMotors(dir, speed, mode);
+  prevError = 0;
+}
+
+/** Floodfill function to update the cell values based on found walls, check slides lecture 2
+    @params maze - takes and modifies the ACTUAL maze by reference
+**/ 
+void floodfill(struct Cell (&maze)[8][8]){
+
+  // Set all the weights to a "blank state of -1"
+  for(int i = 0; i < 8; ++i){
+    for(int j = 0; j < 8; ++j){
+      maze[i][j].weight = -1;
+    }
+  }
+
+  // Set goal cell to 0 and add to Queue
+  maze[GOAL[0]][GOAL[1]].weight = 0;
+  enqueue(maze[GOAL[0]][GOAL[1]]);
+
+  while(Queue.size() > 0){
+    Cell consider = front(); // Look at the front of the queue and consider that cell
+    dequeue();
+
+    // If its northern cell is blank and accessible, update it
+    if(consider.x + 1 < 8){
+      Cell &northern = maze[consider.x+1][consider.y];
+      if(northern.weight == -1 && !maze[consider.x][consider.y].walls[2]){
+        northern.weight = consider.weight+1; 
+        enqueue(northern);
+      }
+    }
+
+    // If its eastern cell is blank and accessible, update it
+    if(consider.y + 1 < 8){
+      Cell &eastern = maze[consider.x][consider.y+1];
+      if(eastern.weight == -1 && !maze[consider.x][consider.y].walls[0]){
+        eastern.weight = consider.weight+1; 
+        enqueue(eastern);
+      }
+    }
+
+    // If its southern cell is blank and accessible, update it
+    if(consider.x - 1 >= 0){
+      Cell &southern = maze[consider.x-1][consider.y];
+      if(southern.weight == -1 && !maze[consider.x][consider.y].walls[3]){
+        southern.weight = consider.weight+1; // coords are a bit messed up sorry, please check the table
+        enqueue(southern);
+      }
+    }
+
+    // If its western cell is blank and accessible, update it
+    if(consider.y - 1 >= 0){
+      Cell &western = maze[consider.x][consider.y-1];
+      if(western.weight == -1 && !maze[consider.x][consider.y].walls[1]){
+        western.weight = consider.weight+1; // coords are a bit messed up sorry, please check the table
+        enqueue(western);
+      }
+    }
+  }
+}
+
+
+//==============================================================================================
+//==============================================================================================
+// YOUR HOMEWORK ASSIGNMENT: Create a function to convert from encoder ticks to centimeters!
+int tickConvertToCm(int encoderTicks){
+  // Your code here 
+  return 0;
+}
+//==============================================================================================
 
 void setup() {
   Serial.begin(9600);
   
-  pinMode(RED_LEDS, OUTPUT);
-  pinMode(RED_LED_H_BRIDGE, OUTPUT);
+  pinMode(EMITTERS, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
   pinMode(INDICATOR_LED_R, OUTPUT);
   pinMode(INDICATOR_LED_L, OUTPUT);
 
@@ -91,74 +306,16 @@ void setup() {
   pinMode(DIR_MOTOR_L, OUTPUT);
   pinMode(DIR_MOTOR_R, OUTPUT);
 
-  attachInterrupt(digitalPinToInterrupt(ENCODER_L_B), interruptHandlerLeft, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_R_A), interruptHandlerRight, CHANGE);
+  pinMode(DIP_SWITCH, INPUT_PULLUP); 
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_L_B), readEncoderLeft, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_R_A), readEncoderRight, CHANGE);
+
+  floodfill(maze); // Initialise the maze before we start the loop
+  printMaze1(maze); 
 }
 
-void interruptHandlerLeft() {
-  if (interruptOccurred) {
-    if(uptick == 4){
-      endTime = micros();
-      uptick = 1;
-    }
-    if(uptick == 3 && fast_read_pin(ENCODER_L_A) == LOW && isActive == true){ // If A active when B trigger and on 3rd pulse is low then forward
-          leftEncoderPos++;
-          isActive = false;
-      } else if(uptick == 2 && fast_read_pin(ENCODER_L_A) == HIGH && isActive == false){ // If A not active when B trigger and also active on second tick we are in reverse
-          leftEncoderPos--;
-      }
-  } else {
-    if(uptick == 1){
-      startTime = micros();
-      if(fast_read_pin(ENCODER_L_A) == HIGH){
-        isActive = true;  
-      } else{
-        isActive = false;
-      }
-    }
-    uptick++;
-  }
-  interruptOccurred = !interruptOccurred;
-}
 
-void interruptHandlerRight() {
-  if (interruptOccurred) {
-    if(uptick == 4){
-      endTime = micros();
-      uptick = 1;
-    }
-    if(uptick == 2 && fast_read_pin(ENCODER_R_B) == HIGH && isActive == true){ // If B active when A trigger and 2nd pulse is high we go forward
-          rightEncoderPos++;
-          isActive = false;
-      } else if(uptick == 2 && fast_read_pin(ENCODER_R_B) == HIGH && isActive == false){ // If B not active on A trigger and B active on 2nd pulse we in reverse
-          rightEncoderPos--;
-      }
-  } else {
-    if(uptick == 1){
-      startTime = micros();
-      if(fast_read_pin(ENCODER_R_B) == HIGH){
-        isActive = true;  
-      } else{
-        isActive = false;
-      }
-    }
-    uptick++;
-  }
-  interruptOccurred = !interruptOccurred;
-}
+void loop() {
 
-void loop(){
-  //Serial.println(ticks());
-  String l = String(leftEncoderPos);
-  String r = String(rightEncoderPos);
-
-  Serial.println("left: " + l + " right: " + r);
-
-  /*digitalWrite(DIR_MOTOR_R, FORWARDS_R);
-  analogWrite(SPEED_MOTOR_R, 150);
-
-  digitalWrite(DIR_MOTOR_L, FORWARDS_L);
-  analogWrite(SPEED_MOTOR_L, 150);*/
-
-  //
 }
