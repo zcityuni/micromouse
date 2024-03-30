@@ -77,8 +77,9 @@ bool switchOn = false;
 int sensorThreshold = 20;
 
 // Variables to keep track of where we are in the maze with coordinates
-const int START[2] = {0,0};
-const int GOAL[2] = {6,6};
+Cell &START = maze[0][0];
+Cell &GOAL = maze[5][5];
+Cell currPos;
 String prevHeading = "NORTH"; // can be NORTH, EAST, SOUTH, WEST, initialise to NORTH 
 /** _______________________________________________________________________________________________________________ **/
 
@@ -160,28 +161,34 @@ void setMotors(int dir, int speed, String mode){
   analogWrite(SPEED_MOTOR_R, speed);
   
   if(mode == "FORWARD"){
+    Serial.print("\nGOING FORWARDS FROM ");
+    Serial.print(prevHeading);
+    Serial.print("\n");
     if(dir == 1){
       fast_write_pin(DIR_MOTOR_L, HIGH);
       fast_write_pin(DIR_MOTOR_R, LOW);
     } else if (dir == -1){
       fast_write_pin(DIR_MOTOR_L, LOW);
       fast_write_pin(DIR_MOTOR_R, HIGH);
-    } else{
-      analogWrite(SPEED_MOTOR_L, 0);
-      analogWrite(SPEED_MOTOR_R, 0);
-    }
+    } 
   } else if(mode == "ROTATE"){ // Making both motors set to same direction will cause the robot to tank turn in place
       if(dir == 1){
       fast_write_pin(DIR_MOTOR_R, LOW);
       fast_write_pin(DIR_MOTOR_L, LOW);
+      Serial.print("\nROTATING CLOCKWISE FROM ");
+      Serial.print(prevHeading);
+      Serial.print("\n");
     } else if (dir == -1){
       fast_write_pin(DIR_MOTOR_R, HIGH);
       fast_write_pin(DIR_MOTOR_L, HIGH);
-    } else{
-      analogWrite(SPEED_MOTOR_R, 0);
+      Serial.print("\nROTATING ANTICLOCKWISE FROM ");
+      Serial.print(prevHeading);
+      Serial.print("\n");
+    } 
+  } else{
       analogWrite(SPEED_MOTOR_L, 0);
+      analogWrite(SPEED_MOTOR_R, 0);
     }
-  }
 }
 //==============================================================================================
 
@@ -205,7 +212,7 @@ void motorPID(int setPoint, float kp, float ki, float kd, String mode){
   float u = kp*error + ki*errorIntegral + kd*errorDerivative; 
 
   float speed = fabs(u);
-  if(speed > 255){
+  if(speed > 255){ //Introduce a speed limit?
     speed = 255;
   }
 
@@ -233,50 +240,47 @@ void floodfill(struct Cell (&maze)[8][8]){
   }
 
   // Set goal cell to 0 and add to Queue
-  maze[GOAL[0]][GOAL[1]].weight = 0;
-  enqueue(maze[GOAL[0]][GOAL[1]]);
+  maze[GOAL.y][GOAL.x].weight = 0;
+  enqueue(maze[GOAL.y][GOAL.x]);
 
   while(Queue.size() > 0){
     Cell consider = front(); // Look at the front of the queue and consider that cell
     dequeue();
-
-    // If its northern cell is blank and accessible, update it
-    if(consider.x + 1 < 8){
-      Cell &northern = maze[consider.x+1][consider.y];
-      if(northern.weight == -1 && !maze[consider.x][consider.y].walls[2]){
-        northern.weight = consider.weight+1; 
-        enqueue(northern);
+    
+    if(consider.y < 8){
+      Cell &northern = maze[consider.y+1][consider.x];
+      if(northern.weight < 0 && !(consider.walls[2]) && !(northern.walls[3])){ // If the current cell's north is blank and accessible from both ends
+          northern.weight = consider.weight+1;
+          enqueue(northern);
       }
     }
 
-    // If its eastern cell is blank and accessible, update it
-    if(consider.y + 1 < 8){
-      Cell &eastern = maze[consider.x][consider.y+1];
-      if(eastern.weight == -1 && !maze[consider.x][consider.y].walls[0]){
-        eastern.weight = consider.weight+1; 
-        enqueue(eastern);
+    if(consider.x < 8){
+      Cell &eastern = maze[consider.y][consider.x+1];
+      if(eastern.weight < 0 && !(consider.walls[0]) && !(eastern.walls[1])){ // If the current cell's east is blank and accessible from both ends
+          eastern.weight = consider.weight+1;
+          enqueue(eastern);
       }
     }
 
-    // If its southern cell is blank and accessible, update it
-    if(consider.x - 1 >= 0){
-      Cell &southern = maze[consider.x-1][consider.y];
-      if(southern.weight == -1 && !maze[consider.x][consider.y].walls[3]){
-        southern.weight = consider.weight+1; // coords are a bit messed up sorry, please check the table
-        enqueue(southern);
+    if(consider.y >= 0){
+      Cell &southern = maze[consider.y-1][consider.x];
+       if(southern.weight < 0 && !(consider.walls[3]) && !(southern.walls[2])){ // If the current cell's south is blank and accessible from both ends
+          southern.weight = consider.weight+1;
+          enqueue(southern);
       }
     }
 
-    // If its western cell is blank and accessible, update it
-    if(consider.y - 1 >= 0){
-      Cell &western = maze[consider.x][consider.y-1];
-      if(western.weight == -1 && !maze[consider.x][consider.y].walls[1]){
-        western.weight = consider.weight+1; // coords are a bit messed up sorry, please check the table
-        enqueue(western);
+    if(consider.x >= 0){
+      Cell &western = maze[consider.y][consider.x-1];
+      if(western.weight < 0 && !(consider.walls[1]) && !(western.walls[0])){ // If the current cell's south is blank and accessible from both ends
+          western.weight = consider.weight+1;
+          enqueue(western);
       }
-    }
+    }    
   }
 }
+
 
 
 //==============================================================================================
@@ -311,11 +315,202 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENCODER_L_B), readEncoderLeft, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_R_A), readEncoderRight, CHANGE);
 
+  
   floodfill(maze); // Initialise the maze before we start the loop
-  printMaze1(maze); 
+  currPos = START; // Set out current position to the starting cell
+  printMazeWeights(maze); 
+
+  Serial.println("GOAL: ");
+  Serial.print(GOAL.x);
+  Serial.print(",");
+  Serial.print(GOAL.y);
+  Serial.print(" GOAL WEIGHT: ");
+  Serial.print(GOAL.weight);
+  Serial.println("\n");
+
+  Serial.println("START: ");
+  Serial.print(currPos.x);
+  Serial.print(",");
+  Serial.print(currPos.y);
+  Serial.print(" CURRENT WEIGHT: ");
+  Serial.print(currPos.weight);
+  Serial.println("");
 }
 
 
 void loop() {
 
+  digitalWrite(EMITTERS, HIGH);
+  int dipSwitch = analogRead(DIP_SWITCH);
+  //Serial.println(dipSwitch);
+  if(dipSwitch > 1000){
+    switchOn = true;
+  }
+
+  if(switchOn){
+    delay(5000);
+
+    while(currPos.x != GOAL.x || currPos.y != GOAL.y){ // Do this until we get to the goal
+      delay(5000);
+
+      // If our sensors detect new walls, update our maze
+      if(analogRead(RIGHT_SENSOR) >  sensorThreshold){
+        maze[currPos.y][currPos.x].walls[0] = true;
+        maze[currPos.y][currPos.x+1].walls[1] = true;
+      }
+      if(analogRead(MIDDLE_SENSOR) >  sensorThreshold){
+        maze[currPos.y][currPos.x].walls[2] = true;
+        maze[currPos.y-1][currPos.x].walls[3] = true;
+      }
+      if(analogRead(LEFT_SENSOR) >  sensorThreshold){
+        maze[currPos.y][currPos.x].walls[1] = true;
+        maze[currPos.y][currPos.x+1].walls[0] = true;
+      }
+    
+    // Check each cardinal direction's cell to see if its the lowest to move to
+    if(currPos.y < 8){
+      Cell &northern = maze[currPos.y+1][currPos.x];
+      if(northern.weight < currPos.weight && !(currPos.walls[2])){ // If northern cell is smaller and accessible then go to it
+        if(prevHeading == "NORTH"){
+          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+        } else if(prevHeading == "EAST"){
+          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+        } else if(prevHeading == "SOUTH"){
+          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+        } else if(prevHeading == "WEST"){
+          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+        }
+
+        //Serial.println("GOING NORTH FROM ");
+        Serial.print("(");
+        Serial.print(currPos.x);
+        Serial.print(",");
+        Serial.print(currPos.y);
+        Serial.print(") ");
+        Serial.print("TO ");
+        Serial.print("(");
+        Serial.print(northern.x);
+        Serial.print(",");
+        Serial.print(northern.y);
+        Serial.print(")\n");
+
+        currPos = northern;
+        prevHeading = "NORTH"; // Update relative heading 
+        delay(5000);
+      }
+    }
+      
+    if(currPos.x < 8){
+      Cell &eastern = maze[currPos.y][currPos.x+1];
+      if(eastern.weight < currPos.weight && !(currPos.walls[0])){ // If eastern cell is smaller and accessible then go to it
+        if(prevHeading == "NORTH"){
+          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+        } else if(prevHeading == "EAST"){
+          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+        } else if(prevHeading == "SOUTH"){
+          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+        } else if(prevHeading == "WEST"){
+          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+        }
+
+        //Serial.println("GOING EAST FROM ");
+        Serial.print("(");
+        Serial.print(currPos.x);
+        Serial.print(",");
+        Serial.print(currPos.y);
+        Serial.print(") ");
+        Serial.print("TO ");
+        Serial.print("(");
+        Serial.print(eastern.x);
+        Serial.print(",");
+        Serial.print(eastern.y);
+        Serial.print(")\n");
+
+        currPos = eastern;
+        prevHeading = "EAST"; // Update relative heading 
+        delay(5000);
+      }
+    }
+      
+    if(currPos.y >= 0){
+      Cell &southern = maze[currPos.y-1][currPos.x];
+      if(southern.weight < currPos.weight && !(currPos.walls[3])){ // If southern cell is smaller and accessible then go to it
+        if(prevHeading == "NORTH"){
+          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+        } else if(prevHeading == "EAST"){
+          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+        } else if(prevHeading == "SOUTH"){
+          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+        } else if(prevHeading == "WEST"){
+          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+        }
+
+        //Serial.println("GOING SOUTH FROM ");
+        Serial.print("(");
+        Serial.print(currPos.x);
+        Serial.print(",");
+        Serial.print(currPos.y);
+        Serial.print(") ");
+        Serial.print("TO ");
+        Serial.print("(");
+        Serial.print(southern.x);
+        Serial.print(",");
+        Serial.print(southern.y);
+        Serial.print(")\n");
+
+        currPos = southern;
+        prevHeading = "SOUTH"; // Update relative heading 
+        delay(5000);
+      }
+    }
+
+    if(currPos.x >= 0){
+      Cell &western = maze[currPos.y][currPos.x-1];
+      if(western.weight < currPos.weight && !(currPos.walls[1])){ // If western cell is smaller and accessible then go to it
+        if(prevHeading == "NORTH"){
+          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+        } else if(prevHeading == "EAST"){
+          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+        } else if(prevHeading == "SOUTH"){
+          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+        } else if(prevHeading == "WEST"){
+          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+        }
+
+        //Serial.println("GOING WEST FROM ");
+        Serial.print("(");
+        Serial.print(currPos.x);
+        Serial.print(",");
+        Serial.print(currPos.y);
+        Serial.print(") ");
+        Serial.print("TO ");
+        Serial.print("(");
+        Serial.print(western.x);
+        Serial.print(",");
+        Serial.print(western.y);
+        Serial.print(")\n");
+
+        currPos = western;
+        prevHeading = "WEST"; // Update relative heading 
+        delay(5000);
+      }
+    }
+      delay(5000);
+      Serial.println("");
+      floodfill(maze); // reflood the maze in case new walls found
+      printMazeWeights(maze); // see what the maze looks like now that new walls detected
+      delay(5000);
+    }
+
+    Serial.println("DONE!");
+    Serial.println("===========");
+    Serial.println("Finished Maze: ");
+    Serial.print("(");
+    Serial.print(currPos.x);
+    Serial.print(",");
+    Serial.print(currPos.y);
+    Serial.print(") \n");
+  }
+  switchOn = false;
+  setMotors(0,0, "STOP"); // Stop the mouse
 }
