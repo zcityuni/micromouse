@@ -67,20 +67,31 @@ volatile int leftEncoderPos = 0; // Counts for left encoder ticks
 
 // Variables to help us with our PID
 int prevTime = 0;
-int prevError;
-int errorIntegral;
+int prevError_l;
+int prevError_r;
+int errorIntegral_l;
+int errorIntegral_r;
 
 // Flag variable to indicate whether the switch is on or off
 bool switchOn = false;
 
 // Variables to keep track of our sensors
-int sensorThreshold = 20;
+int sensorThreshold = 22;
 
 // Variables to keep track of where we are in the maze with coordinates
 Cell &START = maze[0][0];
 Cell &GOAL = maze[5][5];
 Cell currPos;
 String prevHeading = "NORTH"; // can be NORTH, EAST, SOUTH, WEST, initialise to NORTH 
+
+// Variables for setting our target moves - this will be tuned to everyone differently 
+int forwardTarget = 99; 
+int rotateTarget = 44; 
+int forwardPID[3] = {1, 2, 0}; // kp ki kd for going forwards
+int rotatePID[3] = {3, 2, 2}; // kp ki kd for going forwards 
+
+int FWD_COUNT = 0;
+
 /** _______________________________________________________________________________________________________________ **/
 
 /** INTERRUPT SERVICE ROUTINES FOR HANDLING ENCODER COUNTING USING STATE TABLE METHOD **/
@@ -102,13 +113,13 @@ void readEncoderLeft() {
     case 0b0111:
     case 0b1110:
     case 0b1000:
-      leftEncoderPos++;
+      leftEncoderPos--;
       break;
     case 0b0010:
     case 0b1100:
     case 0b0101:
     case 0b1011:
-      leftEncoderPos--;
+      leftEncoderPos++;
       break;
 
     default:
@@ -117,6 +128,7 @@ void readEncoderLeft() {
 
   prevState = currState;
 }
+
 void readEncoderRight() {
   static uint8_t prevState = 0; 
   static uint8_t currState = 0; 
@@ -153,42 +165,30 @@ void readEncoderRight() {
 /** Function to set motor speed and direction for BOTH motors
     @params dir - can either be HIGH or LOW for clockwise / counter clockwise rotation
     @params speed - analogWrite() value between 0-255
-    @params mode - mode you want to move your motors in, can either be FORWARDS mode or ROTATE mode
 **/
 //==============================================================================================
-void setMotors(int dir, int speed, String mode){
-  analogWrite(SPEED_MOTOR_L, speed);
+void setMotor_r(int dir, int speed){
   analogWrite(SPEED_MOTOR_R, speed);
   
-  if(mode == "FORWARD"){
-    Serial.print("\nGOING FORWARDS FROM ");
-    Serial.print(prevHeading);
-    Serial.print("\n");
-    if(dir == 1){
-      fast_write_pin(DIR_MOTOR_L, HIGH);
-      fast_write_pin(DIR_MOTOR_R, LOW);
-    } else if (dir == -1){
-      fast_write_pin(DIR_MOTOR_L, LOW);
-      fast_write_pin(DIR_MOTOR_R, HIGH);
-    } 
-  } else if(mode == "ROTATE"){ // Making both motors set to same direction will cause the robot to tank turn in place
-      if(dir == 1){
-      fast_write_pin(DIR_MOTOR_R, LOW);
-      fast_write_pin(DIR_MOTOR_L, LOW);
-      Serial.print("\nROTATING CLOCKWISE FROM ");
-      Serial.print(prevHeading);
-      Serial.print("\n");
-    } else if (dir == -1){
-      fast_write_pin(DIR_MOTOR_R, HIGH);
-      fast_write_pin(DIR_MOTOR_L, HIGH);
-      Serial.print("\nROTATING ANTICLOCKWISE FROM ");
-      Serial.print(prevHeading);
-      Serial.print("\n");
-    } 
+  if(dir == 1){
+    fast_write_pin(DIR_MOTOR_R, LOW);
+  } else if (dir == -1){
+    fast_write_pin(DIR_MOTOR_R, HIGH);
   } else{
-      analogWrite(SPEED_MOTOR_L, 0);
-      analogWrite(SPEED_MOTOR_R, 0);
-    }
+    analogWrite(SPEED_MOTOR_R, 0);
+  }
+}
+
+void setMotor_l(int dir, int speed){
+  analogWrite(SPEED_MOTOR_L, speed);
+  
+  if(dir == 1){
+    fast_write_pin(DIR_MOTOR_L, HIGH);
+  } else if (dir == -1){
+    fast_write_pin(DIR_MOTOR_L, LOW);
+  } else{
+    analogWrite(SPEED_MOTOR_L, 0);
+  }
 }
 //==============================================================================================
 
@@ -198,22 +198,21 @@ void setMotors(int dir, int speed, String mode){
     @params kp - proportional gain, this is the main one you should be changing
     @params ki - intergral gain, use this for steady state errors
     @params kd - derivative gain, use this for overshoot and oscillation handling 
-    @params mode - mode you want to move your motors in, can either be FORWARDS mode or ROTATE mode
 **/
-void motorPID(int setPoint, float kp, float ki, float kd, String mode){
+void motorPID_r(int setPoint, float kp, float ki, float kd){
   int currentTime = micros();
   int deltaT = ((float)(currentTime - prevTime)) / 1.0e6; // time difference between ticks in seconds
   prevTime = currentTime; // update prevTime each loop 
   
   int error = setPoint - rightEncoderPos;
-  int errorDerivative = (error - prevError) / deltaT;
-  errorIntegral = errorIntegral + error*deltaT;
+  int errorDerivative_r = (error - prevError_r) / deltaT;
+  errorIntegral_r = errorIntegral_r + error*deltaT;
 
-  float u = kp*error + ki*errorIntegral + kd*errorDerivative; 
+  float u = kp*error + ki*errorIntegral_r + kd*errorDerivative_r; 
 
-  float speed = fabs(u);
-  if(speed > 255){ //Introduce a speed limit?
-    speed = 255;
+  float speed = fabs(u); // Set a top speed
+  if(speed > 150){
+    speed = 150;
   }
 
   int dir = 1;
@@ -223,8 +222,81 @@ void motorPID(int setPoint, float kp, float ki, float kd, String mode){
     dir = 1; // Move forward
   }
 
-  setMotors(dir, speed, mode);
-  prevError = 0;
+  setMotor_r(dir, speed);
+  prevError_r = 0;
+}
+
+void motorPID_l(int setPoint, float kp, float ki, float kd){
+  int currentTime = micros();
+  int deltaT = ((float)(currentTime - prevTime)) / 1.0e6; // time difference between ticks in seconds
+  prevTime = currentTime; // update prevTime each loop 
+  
+  int error = setPoint - leftEncoderPos;
+  int errorDerivative_l = (error - prevError_l) / deltaT;
+  errorIntegral_l = errorIntegral_l + error*deltaT;
+
+  float u = kp*error + ki*errorIntegral_l + kd*errorDerivative_l; 
+
+  float speed = fabs(u); // Set a top speed
+  if(speed > 150){
+    speed = 150;
+  }
+
+  int dir = 1;
+  if (u < 0) {
+    dir = -1; // Move backward
+  } else {
+    dir = 1; // Move forward
+  }
+
+  setMotor_l(dir, speed);
+  prevError_l = 0;
+}
+
+void resetCount(){
+  rightEncoderPos = 0;
+  leftEncoderPos = 0;
+  setMotor_r(0, 0);
+  setMotor_l(0, 0);
+}
+
+void goForward(){
+  if(FWD_COUNT > 10){
+    motorPID_r(forwardTarget, forwardPID[0]-0.0588, forwardPID[1], forwardPID[2]);
+    motorPID_l(forwardTarget, forwardPID[0]+0.005, forwardPID[1], forwardPID[2]);
+  } else{
+    motorPID_r(forwardTarget, forwardPID[0]-0.03, forwardPID[1], forwardPID[2]);
+    motorPID_l(forwardTarget, forwardPID[0]+0.01, forwardPID[1], forwardPID[2]);
+  }
+  FWD_COUNT++;
+
+  while (leftEncoderPos < forwardTarget && rightEncoderPos < forwardTarget) {
+    delay(30); 
+  }
+}
+
+void turnRight(){
+  motorPID_r(-rotateTarget, rotatePID[0]-0.9, rotatePID[1], rotatePID[2]);
+  motorPID_l(rotateTarget, rotatePID[0]-0.9, rotatePID[1], rotatePID[2]);
+  while (leftEncoderPos < rotateTarget && rightEncoderPos < rotateTarget) {
+    delay(30); 
+  }
+}
+
+void turnLeft(){
+  motorPID_r(rotateTarget+5, rotatePID[0], rotatePID[1], rotatePID[2]);
+  motorPID_l(-rotateTarget+5, rotatePID[0], rotatePID[1], rotatePID[2]);
+  while (leftEncoderPos < rotateTarget && rightEncoderPos < rotateTarget) {
+    delay(30); 
+  }
+}
+
+void turnAround(){
+  motorPID_r(rotateTarget*2, rotatePID[0]-0.7, rotatePID[1], rotatePID[2]);
+  motorPID_l(-rotateTarget*2, rotatePID[0], rotatePID[1], rotatePID[2]);
+  while (leftEncoderPos < rotateTarget && rightEncoderPos < rotateTarget) {
+    delay(30); 
+  }
 }
 
 /** Floodfill function to update the cell values based on found walls, check slides lecture 2
@@ -282,16 +354,6 @@ void floodfill(struct Cell (&maze)[8][8]){
 }
 
 
-
-//==============================================================================================
-//==============================================================================================
-// YOUR HOMEWORK ASSIGNMENT: Create a function to convert from encoder ticks to centimeters!
-int tickConvertToCm(int encoderTicks){
-  // Your code here 
-  return 0;
-}
-//==============================================================================================
-
 void setup() {
   Serial.begin(9600);
   
@@ -340,18 +402,15 @@ void setup() {
 
 void loop() {
 
-  digitalWrite(EMITTERS, HIGH);
   int dipSwitch = analogRead(DIP_SWITCH);
-  //Serial.println(dipSwitch);
   if(dipSwitch > 1000){
     switchOn = true;
   }
 
   if(switchOn){
     delay(5000);
-
     while(currPos.x != GOAL.x || currPos.y != GOAL.y){ // Do this until we get to the goal
-      delay(5000);
+      digitalWrite(EMITTERS, HIGH);
 
       // If our sensors detect new walls, update our maze
       if(analogRead(RIGHT_SENSOR) >  sensorThreshold){
@@ -372,13 +431,30 @@ void loop() {
       Cell &northern = maze[currPos.y+1][currPos.x];
       if(northern.weight < currPos.weight && !(currPos.walls[2])){ // If northern cell is smaller and accessible then go to it
         if(prevHeading == "NORTH"){
-          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "EAST"){
-          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+          turnLeft();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "SOUTH"){
-          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+          turnAround();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "WEST"){
-          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+          turnRight();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         }
 
         //Serial.println("GOING NORTH FROM ");
@@ -396,7 +472,7 @@ void loop() {
 
         currPos = northern;
         prevHeading = "NORTH"; // Update relative heading 
-        delay(5000);
+        delay(500);
       }
     }
       
@@ -404,13 +480,30 @@ void loop() {
       Cell &eastern = maze[currPos.y][currPos.x+1];
       if(eastern.weight < currPos.weight && !(currPos.walls[0])){ // If eastern cell is smaller and accessible then go to it
         if(prevHeading == "NORTH"){
-          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+          turnRight();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "EAST"){
-          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "SOUTH"){
-          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+          turnLeft();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "WEST"){
-          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+          turnAround();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         }
 
         //Serial.println("GOING EAST FROM ");
@@ -428,7 +521,7 @@ void loop() {
 
         currPos = eastern;
         prevHeading = "EAST"; // Update relative heading 
-        delay(5000);
+        delay(500);
       }
     }
       
@@ -436,13 +529,30 @@ void loop() {
       Cell &southern = maze[currPos.y-1][currPos.x];
       if(southern.weight < currPos.weight && !(currPos.walls[3])){ // If southern cell is smaller and accessible then go to it
         if(prevHeading == "NORTH"){
-          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+          turnAround();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "EAST"){
-          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+          turnRight();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "SOUTH"){
-          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "WEST"){
-          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+          turnLeft();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         }
 
         //Serial.println("GOING SOUTH FROM ");
@@ -460,7 +570,7 @@ void loop() {
 
         currPos = southern;
         prevHeading = "SOUTH"; // Update relative heading 
-        delay(5000);
+        delay(500);
       }
     }
 
@@ -468,13 +578,30 @@ void loop() {
       Cell &western = maze[currPos.y][currPos.x-1];
       if(western.weight < currPos.weight && !(currPos.walls[1])){ // If western cell is smaller and accessible then go to it
         if(prevHeading == "NORTH"){
-          motorPID(-60, 1, 0, 0, "ROTATE"); // rotate anticlockwise
+          turnLeft();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "EAST"){
-          motorPID(-120, 1, 0, 0, "ROTATE"); // rotate 180deg
+          turnAround();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "SOUTH"){
-          motorPID(60, 1, 0, 0, "ROTATE"); // rotate clockwise
+          turnRight();
+          resetCount();
+          delay(200);
+          goForward();
+          resetCount();
+          delay(200);
         } else if(prevHeading == "WEST"){
-          motorPID(100, 1, 0, 0, "FORWARD"); // move the robot forwards
+          goForward();
+          resetCount();
+          delay(200);
         }
 
         //Serial.println("GOING WEST FROM ");
@@ -492,25 +619,27 @@ void loop() {
 
         currPos = western;
         prevHeading = "WEST"; // Update relative heading 
-        delay(5000);
+        delay(500);
       }
     }
-      delay(5000);
+      // After we have selected, moved to a cell and updated our position lets flood the maze again and see what the current state is
+      delay(50);
       Serial.println("");
       floodfill(maze); // reflood the maze in case new walls found
       printMazeWeights(maze); // see what the maze looks like now that new walls detected
-      delay(5000);
+      delay(50);
     }
-
-    Serial.println("DONE!");
-    Serial.println("===========");
-    Serial.println("Finished Maze: ");
-    Serial.print("(");
-    Serial.print(currPos.x);
-    Serial.print(",");
-    Serial.print(currPos.y);
-    Serial.print(") \n");
+      Serial.println("DONE!");
+      Serial.println("===========");
+      Serial.println("Finished Maze: ");
+      Serial.print("(");
+      Serial.print(currPos.x);
+      Serial.print(",");
+      Serial.print(currPos.y);
+      Serial.print(") \n");
+      digitalWrite(EMITTERS, LOW);
   }
-  switchOn = false;
-  setMotors(0,0, "STOP"); // Stop the mouse
+    switchOn = false;
+    setMotor_l(0,0); // Stop the mouse
+    setMotor_r(0,0);
 }
