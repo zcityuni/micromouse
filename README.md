@@ -1,2 +1,2 @@
 # micromouse
-## subheading
+## IEEE Micromouse
